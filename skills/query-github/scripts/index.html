@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>GitHub Explorer - AI Edge Gallery Skill</title>
+</head>
+<body>
+<script>
+  const GITHUB_API = 'https://api.github.com';
+
+  function buildHeaders(token) {
+    const headers = {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'AI-Edge-Gallery-GitHub-Skill'
+    };
+    if (token && token.trim() !== '') {
+      headers['Authorization'] = 'Bearer ' + token.trim();
+    }
+    return headers;
+  }
+
+  async function githubFetch(endpoint, token) {
+    const response = await fetch(GITHUB_API + endpoint, {
+      headers: buildHeaders(token)
+    });
+
+    if (response.status === 403) {
+      const remaining = response.headers.get('X-RateLimit-Remaining');
+      if (remaining === '0') {
+        const resetTime = response.headers.get('X-RateLimit-Reset');
+        const resetDate = new Date(parseInt(resetTime) * 1000);
+        throw new Error('GitHub API rate limit exceeded. Resets at ' + resetDate.toLocaleTimeString() + '. Add a Personal Access Token for higher limits (5000 req/hour).');
+      }
+    }
+
+    if (response.status === 404) {
+      throw new Error('Not found. Please check the owner/repo/username and try again.');
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error('GitHub API error (' + response.status + '): ' + body);
+    }
+
+    return response.json();
+  }
+
+  function formatNumber(num) {
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
+    return String(num);
+  }
+
+  function formatDate(dateStr) {
+    const d = new Date(dateStr);
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  async function searchRepos(params, token) {
+    const query = encodeURIComponent(params.query);
+    const sort = params.sort || 'stars';
+    const order = params.order || 'desc';
+    const perPage = Math.min(params.per_page || 5, 10);
+
+    const data = await githubFetch(
+      '/search/repositories?q=' + query + '&sort=' + sort + '&order=' + order + '&per_page=' + perPage,
+      token
+    );
+
+    if (data.total_count === 0) {
+      return { message: 'No repositories found for "' + params.query + '". Try different keywords.' };
+    }
+
+    const lines = ['Found ' + formatNumber(data.total_count) + ' repositories for "' + params.query + '":\n'];
+    const repos = [];
+
+    data.items.forEach(function(repo, i) {
+      lines.push((i + 1) + '. **' + repo.full_name + '** - ' + formatNumber(repo.stargazers_count) + ' stars');
+      lines.push('   ' + (repo.description || 'No description'));
+      lines.push('   Language: ' + (repo.language || 'N/A') + ' | Forks: ' + formatNumber(repo.forks_count) + ' | Updated: ' + formatDate(repo.updated_at));
+      lines.push('');
+
+      repos.push({
+        name: repo.full_name,
+        desc: repo.description || '',
+        stars: repo.stargazers_count,
+        forks: repo.forks_count,
+        lang: repo.language || 'N/A',
+        url: repo.html_url,
+        avatar: repo.owner.avatar_url,
+        updated: repo.updated_at
+      });
+    });
+
+    const webviewData = encodeURIComponent(JSON.stringify({ type: 'repos', query: params.query, items: repos }));
+    return {
+      message: lines.join('\n'),
+      webview: { url: 'webview.html?data=' + webviewData }
+    };
+  }
+
+  async function getRepo(params, token) {
+    const data = await githubFetch('/repos/' + params.owner + '/' + params.repo, token);
+
+    const lines = [
+      '**' + data.full_name + '**',
+      data.description || 'No description',
+      '',
+      '- Stars: ' + formatNumber(data.stargazers_count),
+      '- Forks: ' + formatNumber(data.forks_count),
+      '- Watchers: ' + formatNumber(data.watchers_count),
+      '- Open Issues: ' + formatNumber(data.open_issues_count),
+      '- Language: ' + (data.language || 'N/A'),
+      '- License: ' + (data.license ? data.license.spdx_id : 'None'),
+      '- Created: ' + formatDate(data.created_at),
+      '- Last Updated: ' + formatDate(data.updated_at),
+      '- Default Branch: ' + data.default_branch
+    ];
+
+    if (data.topics && data.topics.length > 0) {
+      lines.push('- Topics: ' + data.topics.join(', '));
+    }
+
+    if (data.homepage) {
+      lines.push('- Homepage: ' + data.homepage);
+    }
+
+    const webviewData = encodeURIComponent(JSON.stringify({
+      type: 'repo',
+      item: {
+        name: data.full_name,
+        desc: data.description || '',
+        stars: data.stargazers_count,
+        forks: data.forks_count,
+        watchers: data.watchers_count,
+        issues: data.open_issues_count,
+        lang: data.language || 'N/A',
+        license: data.license ? data.license.spdx_id : 'None',
+        created: data.created_at,
+        updated: data.updated_at,
+        url: data.html_url,
+        avatar: data.owner.avatar_url,
+        topics: data.topics || [],
+        homepage: data.homepage || ''
+      }
+    }));
+
+    return {
+      message: lines.join('\n'),
+      webview: { url: 'webview.html?data=' + webviewData }
+    };
+  }
+
+  async function listIssues(params, token) {
+    const state = params.state || 'open';
+    const perPage = Math.min(params.per_page || 5, 10);
+
+    const data = await githubFetch(
+      '/repos/' + params.owner + '/' + params.repo + '/issues?state=' + state + '&per_page=' + perPage,
+      token
+    );
+
+    if (data.length === 0) {
+      return { message: 'No ' + state + ' issues found in ' + params.owner + '/' + params.repo + '.' };
+    }
+
+    const lines = [state.charAt(0).toUpperCase() + state.slice(1) + ' issues in **' + params.owner + '/' + params.repo + '**:\n'];
+    const issues = [];
+
+    data.forEach(function(issue, i) {
+      if (issue.pull_request) return;
+      const labels = issue.labels.map(function(l) { return l.name; }).join(', ');
+      lines.push((i + 1) + '. **#' + issue.number + '** ' + issue.title);
+      lines.push('   By ' + issue.user.login + ' | ' + formatDate(issue.created_at) + (labels ? ' | Labels: ' + labels : ''));
+      lines.push('');
+
+      issues.push({
+        number: issue.number,
+        title: issue.title,
+        user: issue.user.login,
+        avatar: issue.user.avatar_url,
+        state: issue.state,
+        labels: issue.labels.map(function(l) { return { name: l.name, color: l.color }; }),
+        created: issue.created_at,
+        comments: issue.comments,
+        url: issue.html_url
+      });
+    });
+
+    if (issues.length === 0) {
+      return { message: 'No ' + state + ' issues found in ' + params.owner + '/' + params.repo + ' (only pull requests exist).' };
+    }
+
+    const webviewData = encodeURIComponent(JSON.stringify({
+      type: 'issues',
+      repo: params.owner + '/' + params.repo,
+      state: state,
+      items: issues
+    }));
+
+    return {
+      message: lines.join('\n'),
+      webview: { url: 'webview.html?data=' + webviewData }
+    };
+  }
+
+  async function listPulls(params, token) {
+    const state = params.state || 'open';
+    const perPage = Math.min(params.per_page || 5, 10);
+
+    const data = await githubFetch(
+      '/repos/' + params.owner + '/' + params.repo + '/pulls?state=' + state + '&per_page=' + perPage,
+      token
+    );
+
+    if (data.length === 0) {
+      return { message: 'No ' + state + ' pull requests found in ' + params.owner + '/' + params.repo + '.' };
+    }
+
+    const lines = [state.charAt(0).toUpperCase() + state.slice(1) + ' pull requests in **' + params.owner + '/' + params.repo + '**:\n'];
+    const pulls = [];
+
+    data.forEach(function(pr, i) {
+      lines.push((i + 1) + '. **#' + pr.number + '** ' + pr.title);
+      lines.push('   By ' + pr.user.login + ' | ' + formatDate(pr.created_at) + ' | ' + pr.head.ref + ' -> ' + pr.base.ref);
+      lines.push('');
+
+      pulls.push({
+        number: pr.number,
+        title: pr.title,
+        user: pr.user.login,
+        avatar: pr.user.avatar_url,
+        state: pr.state,
+        created: pr.created_at,
+        head: pr.head.ref,
+        base: pr.base.ref,
+        draft: pr.draft || false,
+        url: pr.html_url
+      });
+    });
+
+    const webviewData = encodeURIComponent(JSON.stringify({
+      type: 'pulls',
+      repo: params.owner + '/' + params.repo,
+      state: state,
+      items: pulls
+    }));
+
+    return {
+      message: lines.join('\n'),
+      webview: { url: 'webview.html?data=' + webviewData }
+    };
+  }
+
+  async function getUser(params, token) {
+    const data = await githubFetch('/users/' + params.username, token);
+
+    const lines = [
+      '**' + data.login + '**' + (data.name ? ' (' + data.name + ')' : ''),
+      data.bio || '',
+      '',
+      '- Public Repos: ' + data.public_repos,
+      '- Followers: ' + formatNumber(data.followers),
+      '- Following: ' + formatNumber(data.following),
+      '- Joined: ' + formatDate(data.created_at)
+    ];
+
+    if (data.company) lines.push('- Company: ' + data.company);
+    if (data.location) lines.push('- Location: ' + data.location);
+    if (data.blog) lines.push('- Blog: ' + data.blog);
+    if (data.twitter_username) lines.push('- Twitter: @' + data.twitter_username);
+
+    const webviewData = encodeURIComponent(JSON.stringify({
+      type: 'user',
+      item: {
+        login: data.login,
+        name: data.name || '',
+        bio: data.bio || '',
+        avatar: data.avatar_url,
+        repos: data.public_repos,
+        followers: data.followers,
+        following: data.following,
+        company: data.company || '',
+        location: data.location || '',
+        blog: data.blog || '',
+        twitter: data.twitter_username || '',
+        created: data.created_at,
+        url: data.html_url
+      }
+    }));
+
+    return {
+      message: lines.join('\n'),
+      webview: { url: 'webview.html?data=' + webviewData }
+    };
+  }
+
+  window['ai_edge_gallery_get_result'] = async function(data, secret) {
+    try {
+      var params = JSON.parse(data);
+      var token = secret || '';
+      var result;
+
+      switch (params.action) {
+        case 'search_repos':
+          if (!params.query) throw new Error('Missing required field: query');
+          result = await searchRepos(params, token);
+          break;
+        case 'get_repo':
+          if (!params.owner || !params.repo) throw new Error('Missing required fields: owner and repo');
+          result = await getRepo(params, token);
+          break;
+        case 'list_issues':
+          if (!params.owner || !params.repo) throw new Error('Missing required fields: owner and repo');
+          result = await listIssues(params, token);
+          break;
+        case 'list_pulls':
+          if (!params.owner || !params.repo) throw new Error('Missing required fields: owner and repo');
+          result = await listPulls(params, token);
+          break;
+        case 'get_user':
+          if (!params.username) throw new Error('Missing required field: username');
+          result = await getUser(params, token);
+          break;
+        default:
+          throw new Error('Unknown action: ' + params.action + '. Valid actions: search_repos, get_repo, list_issues, list_pulls, get_user');
+      }
+
+      return JSON.stringify(result);
+    } catch (err) {
+      return JSON.stringify({
+        message: 'Error: ' + err.message
+      });
+    }
+  };
+</script>
+</body>
+</html>
