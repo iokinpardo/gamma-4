@@ -9,28 +9,35 @@
   const GITHUB_API = 'https://api.github.com';
 
   function buildHeaders(token) {
-    const headers = {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'AI-Edge-Gallery-GitHub-Skill'
-    };
+    var headers = {};
     if (token && token.trim() !== '') {
-      headers['Authorization'] = 'Bearer ' + token.trim();
+      headers['Authorization'] = 'token ' + token.trim();
     }
     return headers;
   }
 
   async function githubFetch(endpoint, token) {
-    const response = await fetch(GITHUB_API + endpoint, {
-      headers: buildHeaders(token)
-    });
+    var opts = {};
+    var hdrs = buildHeaders(token);
+    if (Object.keys(hdrs).length > 0) {
+      opts.headers = hdrs;
+    }
+
+    var response;
+    try {
+      response = await fetch(GITHUB_API + endpoint, opts);
+    } catch (networkErr) {
+      throw new Error('Network error: Could not reach GitHub API. Check your internet connection. (' + networkErr.message + ')');
+    }
 
     if (response.status === 403) {
-      const remaining = response.headers.get('X-RateLimit-Remaining');
+      var remaining = response.headers.get('X-RateLimit-Remaining');
       if (remaining === '0') {
-        const resetTime = response.headers.get('X-RateLimit-Reset');
-        const resetDate = new Date(parseInt(resetTime) * 1000);
+        var resetTime = response.headers.get('X-RateLimit-Reset');
+        var resetDate = new Date(parseInt(resetTime) * 1000);
         throw new Error('GitHub API rate limit exceeded. Resets at ' + resetDate.toLocaleTimeString() + '. Add a Personal Access Token for higher limits (5000 req/hour).');
       }
+      throw new Error('Access forbidden (403). The repository may be private or your token may lack permissions.');
     }
 
     if (response.status === 404) {
@@ -38,7 +45,7 @@
     }
 
     if (!response.ok) {
-      const body = await response.text();
+      var body = await response.text();
       throw new Error('GitHub API error (' + response.status + '): ' + body);
     }
 
